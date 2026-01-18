@@ -267,7 +267,8 @@ def main():
     if not email or not password:
         raise SystemExit("Defina NEP_EMAIL e NEP_PASSWORD no ambiente (.env no compose).")
 
-    runner = NepViewerRunner(email, password, headless=True)
+    headless_env = os.environ.get("HEADLESS", "true").lower() == "true"
+    runner = NepViewerRunner(email, password, headless=headless_env)
 
     sched = BlockingScheduler(timezone=TIMEZONE)
     sched.add_job(runner.tick, "interval", seconds=INTERVAL_SECONDS, max_instances=1, coalesce=True)
