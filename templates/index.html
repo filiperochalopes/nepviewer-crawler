@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>NepViewer - Potência(W)</title>
+
+    <!-- Alpine.js (CDN) -->
+    <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Chart.js (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+
+  <body>
+    <div class="container" x-data="powerDashboard()">
+      <header class="header">
+        <div>
+          <h1>NepViewer</h1>
+          <p class="subtitle">Potência(W) coletada a cada 1 minuto (SQLite)</p>
+        </div>
+        <div class="badge">
+          <span>Fuso:</span>
+          <strong>America/Bahia</strong>
+        </div>
+      </header>
+
+      <section class="controls">
+        <div class="segmented">
+          <button :class="mode==='month' ? 'active' : ''" @click="mode='month'; reload()">Por mês</button>
+          <button :class="mode==='day' ? 'active' : ''" @click="mode='day'; reload()">Por dia</button>
+        </div>
+
+        <div class="inputs">
+          <div x-show="mode==='month'">
+            <label>Mês</label>
+            <input type="month" x-model="month" @change="reload()" />
+          </div>
+
+          <div x-show="mode==='day'">
+            <label>Dia</label>
+            <input type="date" x-model="day" @change="reload()" />
+          </div>
+
+          <button class="refresh" @click="reload()">Atualizar</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 x-text="title"></h2>
+          <div class="meta">
+            <span x-text="status"></span>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="powerChart"></canvas>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Últimos pontos (preview)</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Potência(W)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(row, idx) in previewRows" :key="idx">
+                <tr>
+                  <td x-text="row.label"></td>
+                  <td x-text="row.value"></td>
+                </tr>
+              </template>
+              <tr x-show="previewRows.length===0">
+                <td colspan="2" class="muted">Sem dados para o filtro selecionado.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      function powerDashboard() {
+        return {
+          mode: "month",
+          month: "{{ default_month }}",
+          day: "{{ default_day }}",
+          title: "Carregando...",
+          status: "inicializando...",
+          chart: null,
+          previewRows: [],
+
+          async reload() {
+            try {
+              this.status = "carregando...";
+              const params = new URLSearchParams();
+              params.set("mode", this.mode);
+              if (this.mode === "month") params.set("month", this.month);
+              if (this.mode === "day") params.set("day", this.day);
+
+              const res = await fetch(`/api/series?${params.toString()}`);
+              const data = await res.json();
+
+              this.title = data.title || "Potência(W)";
+              const labels = data.labels || [];
+              const values = data.values || [];
+
+              this.previewRows = labels.slice(-20).map((l, i) => ({
+                label: l,
+                value: values.slice(-20)[i],
+              }));
+
+              this.renderChart(labels, values);
+              this.status = `ok • pontos: ${labels.length}`;
+            } catch (e) {
+              console.error(e);
+              this.status = "erro ao carregar";
+            }
+          },
+
+          renderChart(labels, values) {
+            const ctx = document.getElementById("powerChart");
+
+            if (!this.chart) {
+              this.chart = new Chart(ctx, {
+                type: "line",
+                data: {
+                  labels,
+                  datasets: [{
+                    label: "Potência(W)",
+                    data: values,
+                    tension: 0.25,
+                    pointRadius: 2,
+                  }]
+                },
+                options: {
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  interaction: { mode: "index", intersect: false },
+                  plugins: {
+                    legend: { display: true },
+                    tooltip: { enabled: true }
+                  },
+                  scales: {
+                    x: { ticks: { maxRotation: 0, autoSkip: true } },
+                    y: { beginAtZero: false }
+                  }
+                }
+              });
+              return;
+            }
+
+            this.chart.data.labels = labels;
+            this.chart.data.datasets[0].data = values;
+            this.chart.update();
+          },
+
+          init() {
+            this.reload();
+          }
+        }
+      }
+    </script>
+  </body>
+</html>
