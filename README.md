@@ -17,9 +17,14 @@ BeautifulSoup não executa JavaScript. Para evitar engenharia reversa de API/JSO
   - power_w (REAL)
 
 ## Seletor do valor (XPath robusto)
-Usado para pegar o .value do mesmo bloco que contém o label "Potência(W)":
+Usado para capturar o .value no box principal de estatisticas:
 
-//div[contains(@class,'item')][.//div[contains(@class,'label') and normalize-space(.)='Potência(W)']]//div[contains(@class,'value')]
+(//div[contains(concat(' ',normalize-space(@class),' '),' main-box ')]
+   //div[contains(concat(' ',normalize-space(@class),' '),' statistics-box ')]
+   //div[contains(concat(' ',normalize-space(@class),' '),' static-item ')])[1]
+ //div[contains(concat(' ',normalize-space(@class),' '),' item-2 ')
+      and .//div[contains(concat(' ',normalize-space(@class),' '),' value ')]][1]
+ //div[contains(concat(' ',normalize-space(@class),' '),' value ')]
 
 ## Seletores de login
 A tela de login possui ids fixos:

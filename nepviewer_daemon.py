@@ -20,11 +20,14 @@ EMAIL_SEL = "#form_item_account"
 PASS_SEL = "#form_item_password"
 SUBMIT_SEL = "button[type='submit']"
 
-# XPath robusto (label -> value)
+# XPath robusto (value dentro do box principal)
 POWER_XPATH = (
-    "//div[contains(@class,'item')]"
-    "[.//div[contains(@class,'label') and normalize-space(.)='Potência(W)']]"
-    "//div[contains(@class,'value')]"
+    "(//div[contains(concat(' ',normalize-space(@class),' '),' main-box ')]"
+    "//div[contains(concat(' ',normalize-space(@class),' '),' statistics-box ')]"
+    "//div[contains(concat(' ',normalize-space(@class),' '),' static-item ')])[1]"
+    "//div[contains(concat(' ',normalize-space(@class),' '),' item-2 ')"
+    " and .//div[contains(concat(' ',normalize-space(@class),' '),' value ')]][1]"
+    "//div[contains(concat(' ',normalize-space(@class),' '),' value ')]"
 )
 
 # Intervalo de coleta (segundos)
@@ -114,10 +117,10 @@ class NepViewerRunner:
 
         self.pw = self.browser = self.context = self.page = None
 
-    def ensure_logged_in(self):
+    def ensure_logged_in(self) -> bool:
         # Tenta ir direto para o dashboard
         try:
-            if self.page.url != DASHBOARD_URL:
+            if not self.page.url.startswith(DASHBOARD_URL):
                 self.page.goto(DASHBOARD_URL, wait_until="domcontentloaded")
         except Exception as e:
             print(f"[WARN] Goto failed: {e}")
@@ -150,33 +153,45 @@ class NepViewerRunner:
                 self.context.storage_state(path=STATE_PATH)
             except Exception as e:
                 print(f"[WARN] Falha ao esperar dashboard pós-login: {e}")
+                return False
+        else:
+            # Já estamos no dashboard; força refresh para garantir dados atuais
+            try:
+                self.page.reload(wait_until="networkidle")
+            except Exception as e:
+                print(f"[WARN] Falha ao recarregar dashboard: {e}")
+
+        if not self.page.url.startswith(DASHBOARD_URL):
+            try:
+                self.page.goto(DASHBOARD_URL, wait_until="domcontentloaded")
+                self.page.wait_for_selector(".head-bar", timeout=30_000)
+            except Exception as e:
+                print(f"[WARN] Não foi possível confirmar dashboard: {e}")
+                return False
+
+        if not self.page.locator(".head-bar").is_visible():
+            print("[WARN] Dashboard não confirmado (sem .head-bar visível).")
+            return False
+
+        return True
 
     def read_power(self) -> float:
         print(f"[DEBUG] Iniciando leitura. URL: {self.page.url} | Título: {self.page.title()}")
 
         # Verifica se estamos na URL certa
-        if "dashboard" not in self.page.url:
+        if not self.page.url.startswith(DASHBOARD_URL):
              print(f"[WARN] Parece que não estamos no dashboard. URL atual: {self.page.url}")
 
-        # Garante que carregou pelo menos algum label (CSS selector é melhor que XPath para Shadow DOM)
-        try:
-            self.page.wait_for_selector(".label", timeout=30_000)
-        except PlaywrightTimeoutError:
-            print(f"[ERRO] Nenhum .label encontrado na URL: {self.page.url}")
-            print(f"[DEBUG] HTML Preview: {self.page.content()[:1000]}")
-            raise
+        # Se caiu no login por redirecionamento, tenta autenticar novamente
+        if self.page.locator(EMAIL_SEL).is_visible() or not self.page.url.startswith(DASHBOARD_URL):
+            print("[WARN] Detectada tela de login durante leitura. Reautenticando...")
+            if not self.ensure_logged_in():
+                raise PlaywrightTimeoutError("Não foi possível confirmar o dashboard para leitura.")
 
-        # XPath mais permissivo: procura 'Potência' no label (ignora case/sulfixo exato)
-        xpath = (
-            "//div[contains(@class, 'item')]"
-            "[.//div[contains(@class, 'label') and contains(., 'Potência')]]"
-            "//div[contains(@class, 'value')]"
-        )
-        
-        el = self.page.locator(f"xpath={xpath}").first
+        el = self.page.locator(f"xpath={POWER_XPATH}").first
         try:
             # Tenta rápido primeiro
-            el.wait_for(state="visible", timeout=5_000)
+            el.wait_for(state="visible", timeout=20_000)
             txt = el.inner_text().strip()
             return parse_float(txt)
         except Exception:
@@ -246,7 +261,8 @@ class NepViewerRunner:
             self.start()
 
         try:
-            self.ensure_logged_in()
+            if not self.ensure_logged_in():
+                raise PlaywrightTimeoutError("Login não confirmado; pulando leitura.")
             power_w = self.read_power()
             save_reading(power_w)
         except PlaywrightTimeoutError as e:

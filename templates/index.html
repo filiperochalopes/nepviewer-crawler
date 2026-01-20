@@ -33,6 +33,10 @@
           <button :class="mode==='day' ? 'active' : ''" @click="mode='day'; reload()">Por dia</button>
         </div>
 
+        <div class="stat-total" x-show="statValue !== null" style="margin-left: 1rem; font-weight: bold;">
+          <span x-text="statLabel"></span>: <span x-text="statValue"></span> <span x-text="statUnit"></span>
+        </div>
+
         <div class="inputs">
           <div x-show="mode==='month'">
             <label>Mês</label>
@@ -62,14 +66,14 @@
 
       <section class="card">
         <div class="card-head">
-          <h2>Últimos pontos (preview)</h2>
+          <h2>Últimos pontos</h2>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>Label</th>
-                <th>Potência(W)</th>
+                <th x-text="statUnit === 'kWh' ? 'Energia (kWh)' : 'Potência (W)'"></th>
               </tr>
             </thead>
             <tbody>
@@ -86,18 +90,49 @@
           </table>
         </div>
       </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2>Últimas aferições (10 min)</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Potência (W)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(row, idx) in recentRows" :key="idx">
+                <tr>
+                  <td x-text="row.label"></td>
+                  <td x-text="row.value"></td>
+                </tr>
+              </template>
+              <tr x-show="recentRows.length===0">
+                <td colspan="2" class="muted">Sem aferições recentes.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
 
     <script>
       function powerDashboard() {
         return {
-          mode: "month",
+          mode: "day",
           month: "{{ default_month }}",
           day: "{{ default_day }}",
           title: "Carregando...",
           status: "inicializando...",
+          statLabel: "Pico",
+          statValue: null,
+          statUnit: "W",
           chart: null,
           previewRows: [],
+          recentRows: [],
 
           async reload() {
             try {
@@ -108,60 +143,78 @@
               if (this.mode === "day") params.set("day", this.day);
 
               const res = await fetch(`/api/series?${params.toString()}`);
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              
               const data = await res.json();
 
               this.title = data.title || "Potência(W)";
+              this.statLabel = data.stat_label || "Total";
+              this.statValue = data.stat_value !== undefined ? data.stat_value : null;
+              this.statUnit = data.stat_unit || "W";
+              
               const labels = data.labels || [];
               const values = data.values || [];
 
-              this.previewRows = labels.slice(-20).map((l, i) => ({
-                label: l,
-                value: values.slice(-20)[i],
-              }));
+              const pairs = labels.map((label, i) => ({ label, value: values[i] }));
+              const nonNull = pairs.filter((p) => (
+                p.value !== null && p.value !== undefined && !Number.isNaN(p.value)
+              ));
+              this.previewRows = nonNull.slice(-10).reverse();
+              this.recentRows = data.recent_raw || [];
 
               this.renderChart(labels, values);
               this.status = `ok • pontos: ${labels.length}`;
             } catch (e) {
               console.error(e);
-              this.status = "erro ao carregar";
+              this.status = "erro: " + (e.message || e);
             }
           },
 
           renderChart(labels, values) {
+            if (typeof Chart === 'undefined') {
+              throw new Error("Chart.js não carregado");
+            }
             const ctx = document.getElementById("powerChart");
-
-            if (!this.chart) {
-              this.chart = new Chart(ctx, {
-                type: "line",
-                data: {
-                  labels,
-                  datasets: [{
-                    label: "Potência(W)",
-                    data: values,
-                    tension: 0.25,
-                    pointRadius: 2,
-                  }]
-                },
-                options: {
-                  responsive: true,
-                  maintainAspectRatio: false,
-                  interaction: { mode: "index", intersect: false },
-                  plugins: {
-                    legend: { display: true },
-                    tooltip: { enabled: true }
-                  },
-                  scales: {
-                    x: { ticks: { maxRotation: 0, autoSkip: true } },
-                    y: { beginAtZero: false }
-                  }
-                }
-              });
-              return;
+            if (!ctx) {
+              throw new Error("Canvas #powerChart não encontrado");
             }
 
-            this.chart.data.labels = labels;
-            this.chart.data.datasets[0].data = values;
-            this.chart.update();
+            const labelStr = this.statUnit === 'kWh' ? "Energia (kWh)" : "Potência (W)";
+            const dataValues = (values || []).map((v) =>
+              v === null || v === undefined || Number.isNaN(v) ? null : Number(v)
+            );
+
+            if (this.chart) {
+              this.chart.destroy();
+              this.chart = null;
+            }
+
+            this.chart = new Chart(ctx, {
+              type: "line",
+              data: {
+                labels,
+                datasets: [{
+                  label: labelStr,
+                  data: dataValues,
+                  tension: 0.25,
+                  pointRadius: 2,
+                  spanGaps: false,
+                }]
+              },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                  legend: { display: true },
+                  tooltip: { enabled: true }
+                },
+                scales: {
+                  x: { ticks: { maxRotation: 0, autoSkip: true } },
+                  y: { beginAtZero: false }
+                }
+              }
+            });
           },
 
           init() {
