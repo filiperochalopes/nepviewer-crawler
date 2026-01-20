@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import sqlite3
@@ -20,6 +21,45 @@ EMAIL_SEL = "#form_item_account"
 PASS_SEL = "#form_item_password"
 SUBMIT_SEL = "button[type='submit']"
 
+# Selectors flexiveis caso o layout mude
+LOGIN_MARKER_SELECTORS = [
+    "#form_item_account",
+    "#form_item_username",
+    "#form_item_email",
+    "input[type='email']",
+    "input[name*='email' i]",
+    "input[id*='email' i]",
+    "input[name*='account' i]",
+    "input[id*='account' i]",
+    "input[placeholder*='email' i]",
+    "input[placeholder*='e-mail' i]",
+    "input[type='password']",
+]
+EMAIL_INPUT_SELECTORS = [
+    "#form_item_account",
+    "#form_item_username",
+    "#form_item_email",
+    "input[type='email']",
+    "input[name*='email' i]",
+    "input[id*='email' i]",
+    "input[placeholder*='email' i]",
+    "input[placeholder*='e-mail' i]",
+    "input[name*='account' i]",
+    "input[id*='account' i]",
+]
+PASS_INPUT_SELECTORS = [
+    "#form_item_password",
+    "input[type='password']",
+    "input[name*='password' i]",
+    "input[id*='password' i]",
+]
+SUBMIT_SELECTORS = [
+    "button[type='submit']",
+    "button:has-text('Login')",
+    "button:has-text('Entrar')",
+    "button:has-text('Sign in')",
+]
+
 # XPath robusto (value dentro do box principal)
 POWER_XPATH = (
     "(//div[contains(concat(' ',normalize-space(@class),' '),' main-box ')]"
@@ -35,6 +75,12 @@ INTERVAL_SECONDS = int(os.environ.get("INTERVAL_SECONDS", "60"))
 
 # Reinicia o browser a cada N coletas (ex.: 360 = 6h se 1/min)
 RESTART_EVERY_N_RUNS = int(os.environ.get("RESTART_EVERY_N_RUNS", "360"))
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def init_db():
@@ -58,7 +104,7 @@ def save_reading(power_w: float):
     cur.execute("INSERT INTO nep_power (ts_local, power_w) VALUES (?, ?)", (ts_local, power_w))
     conn.commit()
     conn.close()
-    print(f"[{ts_local}] power_w={power_w}")
+    logger.info("power_w=%s ts_local=%s", power_w, ts_local)
 
 
 def parse_float(text: str) -> float:
@@ -117,13 +163,65 @@ class NepViewerRunner:
 
         self.pw = self.browser = self.context = self.page = None
 
+    def _first_visible(self, selectors):
+        for sel in selectors:
+            try:
+                loc = self.page.locator(sel).first
+                if loc.is_visible():
+                    return loc, sel
+            except Exception:
+                continue
+        return None, None
+
+    def _looks_like_login(self) -> bool:
+        url = self.page.url or ""
+        if "redirect=" in url or "login" in url:
+            return True
+        for sel in LOGIN_MARKER_SELECTORS:
+            try:
+                if self.page.locator(sel).first.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _attempt_login(self) -> bool:
+        email_loc, email_sel = self._first_visible(EMAIL_INPUT_SELECTORS)
+        pass_loc, pass_sel = self._first_visible(PASS_INPUT_SELECTORS)
+        if not email_loc or not pass_loc:
+            logger.warning(
+                "Nao encontrei campos de login visiveis (email_sel=%s pass_sel=%s url=%s)",
+                email_sel,
+                pass_sel,
+                self.page.url,
+            )
+            return False
+
+        email_loc.fill(self.email)
+        pass_loc.fill(self.password)
+
+        submit_loc, submit_sel = self._first_visible(SUBMIT_SELECTORS)
+        if submit_loc:
+            submit_loc.click()
+        else:
+            pass_loc.press("Enter")
+            submit_sel = "Enter"
+
+        logger.info(
+            "Login enviado (email_sel=%s pass_sel=%s submit_sel=%s)",
+            email_sel,
+            pass_sel,
+            submit_sel,
+        )
+        return True
+
     def ensure_logged_in(self) -> bool:
         # Tenta ir direto para o dashboard
         try:
             if not self.page.url.startswith(DASHBOARD_URL):
                 self.page.goto(DASHBOARD_URL, wait_until="domcontentloaded")
         except Exception as e:
-            print(f"[WARN] Goto failed: {e}")
+            logger.warning("Goto failed: %s", e)
 
         # Espera um pouco para ver onde caímos (Dashboard ou Login)
         # Se cair no login, geralmente aparece #form_item_account
@@ -134,17 +232,16 @@ class NepViewerRunner:
             # Race condition: espera login OU dashboard
             # Selector do login: #form_item_account
             # Selector do dashboard: div.head-bar
-            self.page.wait_for_selector("#form_item_account, .head-bar", timeout=20_000)
+            markers = ", ".join(LOGIN_MARKER_SELECTORS + [".head-bar"])
+            self.page.wait_for_selector(markers, timeout=20_000)
         except Exception:
-            print(f"[WARN] Não detectou nem Login nem Dashboard em {self.page.url}")
+            logger.warning("Nao detectou nem Login nem Dashboard em %s", self.page.url)
 
-        # Se tiver campo de login, faz login
-        if self.page.locator(EMAIL_SEL).is_visible():
-            print("Detectada tela de login. Autenticando...")
-            self.page.fill(EMAIL_SEL, self.email)
-            self.page.fill(PASS_SEL, self.password)
-            self.page.click(SUBMIT_SEL)
-            
+        # Se parecer login, faz login
+        if self._looks_like_login():
+            logger.info("Detectada tela de login. Autenticando...")
+            if not self._attempt_login():
+                return False
             # Espera navegar após login
             try:
                 self.page.wait_for_url("**/dashboard", timeout=60_000)
@@ -152,39 +249,51 @@ class NepViewerRunner:
                 # Salva cookies
                 self.context.storage_state(path=STATE_PATH)
             except Exception as e:
-                print(f"[WARN] Falha ao esperar dashboard pós-login: {e}")
+                logger.warning("Falha ao esperar dashboard pos-login: %s (url=%s)", e, self.page.url)
                 return False
-        else:
+        elif self.page.url.startswith(DASHBOARD_URL):
             # Já estamos no dashboard; força refresh para garantir dados atuais
             try:
                 self.page.reload(wait_until="networkidle")
             except Exception as e:
-                print(f"[WARN] Falha ao recarregar dashboard: {e}")
+                logger.warning("Falha ao recarregar dashboard: %s", e)
 
         if not self.page.url.startswith(DASHBOARD_URL):
             try:
                 self.page.goto(DASHBOARD_URL, wait_until="domcontentloaded")
-                self.page.wait_for_selector(".head-bar", timeout=30_000)
+                markers = ", ".join(LOGIN_MARKER_SELECTORS + [".head-bar"])
+                self.page.wait_for_selector(markers, timeout=20_000)
             except Exception as e:
-                print(f"[WARN] Não foi possível confirmar dashboard: {e}")
-                return False
+                logger.warning("Nao foi possivel carregar dashboard: %s (url=%s)", e, self.page.url)
+
+            if self._looks_like_login():
+                logger.info("Detectada tela de login apos redirect. Autenticando...")
+                if not self._attempt_login():
+                    return False
+                try:
+                    self.page.wait_for_url("**/dashboard", timeout=60_000)
+                    self.page.wait_for_selector(".head-bar", timeout=30_000)
+                    self.context.storage_state(path=STATE_PATH)
+                except Exception as e:
+                    logger.warning("Falha ao esperar dashboard pos-login: %s (url=%s)", e, self.page.url)
+                    return False
 
         if not self.page.locator(".head-bar").is_visible():
-            print("[WARN] Dashboard não confirmado (sem .head-bar visível).")
+            logger.warning("Dashboard nao confirmado (sem .head-bar visivel). url=%s", self.page.url)
             return False
 
         return True
 
     def read_power(self) -> float:
-        print(f"[DEBUG] Iniciando leitura. URL: {self.page.url} | Título: {self.page.title()}")
+        logger.debug("Iniciando leitura. URL: %s | Titulo: %s", self.page.url, self.page.title())
 
         # Verifica se estamos na URL certa
         if not self.page.url.startswith(DASHBOARD_URL):
-             print(f"[WARN] Parece que não estamos no dashboard. URL atual: {self.page.url}")
+             logger.warning("Parece que nao estamos no dashboard. URL atual: %s", self.page.url)
 
         # Se caiu no login por redirecionamento, tenta autenticar novamente
-        if self.page.locator(EMAIL_SEL).is_visible() or not self.page.url.startswith(DASHBOARD_URL):
-            print("[WARN] Detectada tela de login durante leitura. Reautenticando...")
+        if self._looks_like_login() or not self.page.url.startswith(DASHBOARD_URL):
+            logger.warning("Detectada tela de login durante leitura. Reautenticando...")
             if not self.ensure_logged_in():
                 raise PlaywrightTimeoutError("Não foi possível confirmar o dashboard para leitura.")
 
@@ -195,7 +304,7 @@ class NepViewerRunner:
             txt = el.inner_text().strip()
             return parse_float(txt)
         except Exception:
-            print("[DEBUG] XPath específico falhou ou timeout. Tentando varredura GLOBAL de labels...")
+            logger.debug("XPath especifico falhou ou timeout. Tentando varredura GLOBAL de labels...")
             
             # Tenta encontrar em todos os frames (caso use iframe)
             all_labels = []
@@ -209,12 +318,17 @@ class NepViewerRunner:
                 try:
                     fl = frame.locator(".label").all()
                     if fl:
-                        print(f"[DEBUG] Encontrados {len(fl)} labels no frame '{frame.name}' ({frame.url})")
+                        logger.debug(
+                            "Encontrados %s labels no frame '%s' (%s)",
+                            len(fl),
+                            frame.name,
+                            frame.url,
+                        )
                         all_labels.extend([(l, f"frame:{frame.name}") for l in fl])
                 except:
                     pass
 
-            print(f"[DEBUG] Total de labels encontrados (frames somados): {len(all_labels)}")
+            logger.debug("Total de labels encontrados (frames somados): %s", len(all_labels))
 
             for i, (lbl_el, origin) in enumerate(all_labels):
                 try:
@@ -229,23 +343,29 @@ class NepViewerRunner:
                     if val_el.count() > 0:
                         val_txt = val_el.inner_text().strip()
                         
-                    print(f"  [Global Item {i} | {origin}] Label='{lbl_txt}' | Value='{val_txt}'")
+                    logger.debug(
+                        "[Global Item %s | %s] Label='%s' | Value='%s'",
+                        i,
+                        origin,
+                        lbl_txt,
+                        val_txt,
+                    )
                     
                     # Checagem mais estrita
                     if ("Potência" in lbl_txt or "Power(W)" in lbl_txt or ("Power" in lbl_txt and "(W)" in lbl_txt)) and "kWh" not in lbl_txt:
                          if val_txt and val_txt != "N/A":
                             return parse_float(val_txt)
                 except Exception as e:
-                    print(f"  [Global Item {i}] Ignorado (erro leitura): {e}")
+                    logger.debug("[Global Item %s] Ignorado (erro leitura): %s", i, e)
             
             # Se chegou aqui, realmente não achou
             # Dump do HTML para debug profundo
             try:
                 with open("/data/debug_page.html", "w", encoding="utf-8") as f:
                     f.write(self.page.content())
-                print("[DEBUG] HTML completo salvo em /data/debug_page.html")
+                logger.debug("HTML completo salvo em /data/debug_page.html")
             except Exception as e:
-                print(f"[WARN] Falha ao salvar debug html: {e}")
+                logger.warning("Falha ao salvar debug html: %s", e)
 
             raise PlaywrightTimeoutError("Não foi possível encontrar campo de Potência (W) após varredura global.")
 
@@ -266,10 +386,10 @@ class NepViewerRunner:
             power_w = self.read_power()
             save_reading(power_w)
         except PlaywrightTimeoutError as e:
-            print(f"[WARN] timeout: {e}")
+            logger.warning("timeout: %s", e)
             self.stop()
         except Exception as e:
-            print(f"[WARN] error: {e}")
+            logger.warning("error: %s", e)
             # não derruba o scheduler; tenta de novo no próximo tick, possivelmente reabrindo o browser se tiver parado
             if self.page is None:
                 self.stop() # garante limpeza total se algo quebrou parcialmente
@@ -289,7 +409,7 @@ def main():
     sched = BlockingScheduler(timezone=TIMEZONE)
     sched.add_job(runner.tick, "interval", seconds=INTERVAL_SECONDS, max_instances=1, coalesce=True)
 
-    print(f"Running every {INTERVAL_SECONDS}s. Ctrl+C to stop.")
+    logger.info("Running every %ss. Ctrl+C to stop.", INTERVAL_SECONDS)
     try:
         sched.start()
     finally:
