@@ -1,5 +1,8 @@
+import asyncio
+import logging
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from typing import List, Dict, Any, Tuple
@@ -10,18 +13,95 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.requests import Request
 
+from nepviewer_client import NepViewerClient
+
 
 TIMEZONE = ZoneInfo("America/Bahia")
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "nepviewer.db")
+INTERVAL_SECONDS = int(os.environ.get("INTERVAL_SECONDS", "60"))
 
-app = FastAPI(title="NepViewer Power Dashboard", version="1.0.0")
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger(__name__)
+collector_status = {"state": "starting", "last_success": None, "last_error": None}
+
+
+def init_db():
+    with sqlite3.connect(SQLITE_PATH, timeout=30) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS nep_power (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_local TEXT NOT NULL,
+                power_w REAL NOT NULL
+            )
+        """)
+
+
+def save_reading(power_w: float):
+    ts_local = datetime.now(TIMEZONE).isoformat(timespec="seconds")
+    with sqlite3.connect(SQLITE_PATH, timeout=30) as conn:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute(
+            "INSERT INTO nep_power (ts_local, power_w) VALUES (?, ?)",
+            (ts_local, power_w),
+        )
+    return ts_local
+
+
+async def collect_loop(client: NepViewerClient):
+    while True:
+        try:
+            power_w, unit = await asyncio.to_thread(client.current_power)
+            ts_local = await asyncio.to_thread(save_reading, power_w)
+            collector_status.update(
+                state="ok",
+                last_success=ts_local,
+                last_error=None,
+            )
+            logger.info("power_w=%s unit=%s ts_local=%s", power_w, unit, ts_local)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            collector_status.update(state="error", last_error=str(error))
+            logger.warning("collection failed: %s", error)
+        await asyncio.sleep(INTERVAL_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    account = os.environ.get("NEP_EMAIL", "").strip()
+    password = os.environ.get("NEP_PASSWORD", "")
+    if not account or not password:
+        raise RuntimeError("NEP_EMAIL and NEP_PASSWORD are required")
+    init_db()
+    task = asyncio.create_task(collect_loop(NepViewerClient(account, password)))
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+app = FastAPI(
+    title="NepViewer Power Dashboard",
+    version="2.0.0",
+    lifespan=lifespan,
+)
 
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 def db_connect():
-    return sqlite3.connect(SQLITE_PATH)
+    return sqlite3.connect(SQLITE_PATH, timeout=30)
+
+
+@app.get("/health")
+def health():
+    return collector_status
 
 
 def parse_ts(ts_local: str) -> datetime:

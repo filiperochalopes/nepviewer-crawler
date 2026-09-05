@@ -1,24 +1,18 @@
-FROM python:3.12-bookworm
+FROM python:3.12-alpine
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install dependencies defined in requirements.txt
+RUN apk add --no-cache tzdata
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers (Chromium only) and system dependencies
-RUN playwright install --with-deps chromium
-
-# Copy application code
-COPY nepviewer_daemon.py ./
-COPY web_app.py ./
-
-# Copy templates and static files
+COPY nepviewer_client.py web_app.py ./
 COPY templates ./templates
 COPY static ./static
 
-# Default command
-CMD ["python", "nepviewer_daemon.py"]
+USER 1000:1000
+
+CMD ["uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
