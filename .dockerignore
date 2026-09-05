@@ -1,5 +1,10 @@
 .env
+.env.*
+!.env.example
 .git
 data
 __pycache__
 *.py[cod]
+logs
+*.log
+backups
